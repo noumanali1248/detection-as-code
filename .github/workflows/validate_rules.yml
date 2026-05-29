@@ -11,8 +11,6 @@ on:
 jobs:
   validate:
     runs-on: ubuntu-latest
-    outputs:
-      rules_valid: ${{ steps.set-output.outputs.valid }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -22,7 +20,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Sigma CLI
+      - name: Install Sigma CLI and Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install sigma-cli pyyaml
@@ -33,7 +31,7 @@ jobs:
           import glob, sys, yaml
           files = glob.glob('sigma_rules/*.yml')
           if not files:
-              print("No .yml files found")
+              print("No .yml files found in sigma_rules/")
               sys.exit(1)
           failed = False
           for f in files:
@@ -47,9 +45,10 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Sigma Rule Validation
+      - name: Sigma Rule Validation (sigma check)
         run: |
           for file in sigma_rules/*.yml; do
+            echo "Checking $file"
             sigma check "$file" || exit 1
           done
 
@@ -64,7 +63,7 @@ jobs:
               data = yaml.safe_load(open(f))
               for field in REQUIRED:
                   if field not in data:
-                      print(f'❌ Missing {field} in {f}')
+                      print(f'❌ Missing field: {field} in {f}')
                       failed = True
               if 'detection' in data and 'condition' not in data['detection']:
                   print(f'❌ Missing detection.condition in {f}')
@@ -72,17 +71,61 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Convert Sigma to ELK (EQL)
+      # Convert Sigma to ELK (EQL) using Python (no Sigma plugin issues)
+      - name: Convert Sigma to ELK (EQL + JSON)
         run: |
           mkdir -p build/elk
-          for rule in sigma_rules/*.yml; do
-            base=$(basename "$rule" .yml)
-            sigma convert -t eql --without-pipeline "$rule" > "build/elk/${base}.eql"
-            if [ $? -ne 0 ]; then exit 1; fi
-            echo "{\"type\":\"eql\",\"name\":\"$base\",\"language\":\"eql\",\"query\":$(jq -Rs . < "build/elk/${base}.eql"),\"severity\":\"medium\",\"enabled\":true}" > "build/elk/${base}.json"
-          done
+          python - <<'PY'
+          import os, sys, yaml, glob, json
+          def sigma_to_eql(sigma_data):
+              detection = sigma_data.get('detection', {})
+              eql_parts = []
+              if 'selection' in detection:
+                  sel = detection['selection']
+                  if isinstance(sel, dict):
+                      for field, value in sel.items():
+                          if isinstance(value, str):
+                              if '*' in value:
+                                  eql_parts.append(f'{field} : "{value}"')
+                              else:
+                                  eql_parts.append(f'{field} == "{value}"')
+                          elif isinstance(value, list):
+                              or_conds = [f'{field} == "{v}"' for v in value]
+                              eql_parts.append('(' + ' or '.join(or_conds) + ')')
+              eql_query = ' and '.join(eql_parts) if eql_parts else 'true'
+              rule_json = {
+                  "type": "eql",
+                  "name": sigma_data.get('title', 'sigma_rule'),
+                  "language": "eql",
+                  "query": eql_query,
+                  "severity": sigma_data.get('level', 'medium'),
+                  "risk_score": 50,
+                  "interval": "5m",
+                  "enabled": True,
+                  "description": sigma_data.get('description', ''),
+                  "author": sigma_data.get('author', 'Detection Team')
+              }
+              return eql_query, rule_json
+          failed = False
+          for rule_file in glob.glob('sigma_rules/*.yml'):
+              with open(rule_file) as f:
+                  data = yaml.safe_load(f)
+              base = os.path.basename(rule_file).replace('.yml', '')
+              eql_query, rule_json = sigma_to_eql(data)
+              try:
+                  with open(f'build/elk/{base}.eql', 'w') as out:
+                      out.write(eql_query)
+                  with open(f'build/elk/{base}.json', 'w') as out:
+                      json.dump(rule_json, out, indent=2)
+                  print(f'✅ Converted {rule_file} -> ELK')
+              except Exception as e:
+                  print(f'❌ Failed {rule_file}: {e}')
+                  failed = True
+          sys.exit(1 if failed else 0)
+          PY
 
-      - name: Convert Sigma to Wazuh XML (Custom)
+      # Convert Sigma to Wazuh XML using custom Python
+      - name: Convert Sigma to Wazuh XML
         run: |
           mkdir -p build/wazuh
           python - <<'PY'
@@ -91,10 +134,10 @@ jobs:
               rule_id = str(sigma_data.get('id', '100000'))[:20]
               level = sigma_data.get('level', '5')
               if isinstance(level, int): level = str(level)
-              level_map = {'low':'3','medium':'7','high':'10','critical':'15'}
+              level_map = {'low':'3', 'medium':'7', 'high':'10', 'critical':'15'}
               level = level_map.get(level.lower(), level)
               root = ET.Element("rule", id=rule_id, level=level)
-              ET.SubElement(root, "description").text = sigma_data.get('description','')
+              ET.SubElement(root, "description").text = sigma_data.get('description', '')
               logsource = sigma_data.get('logsource', {})
               if 'product' in logsource:
                   ET.SubElement(root, "if_sid").text = "5710"
@@ -107,11 +150,11 @@ jobs:
           for f in glob.glob('sigma_rules/*.yml'):
               with open(f) as fp:
                   data = yaml.safe_load(fp)
-              outpath = os.path.join('build/wazuh', os.path.basename(f).replace('.yml','.xml'))
+              outpath = os.path.join('build/wazuh', os.path.basename(f).replace('.yml', '.xml'))
               try:
-                  with open(outpath,'w') as out:
+                  with open(outpath, 'w') as out:
                       out.write(sigma_to_wazuh(data))
-                  print(f'✅ Converted {f}')
+                  print(f'✅ Converted {f} -> Wazuh')
               except Exception as e:
                   print(f'❌ Failed {f}: {e}')
                   failed = True
@@ -124,15 +167,11 @@ jobs:
           name: detection-rules-converted
           path: build/
 
-      - name: Set output for validation status
-        id: set-output
-        run: echo "valid=true" >> $GITHUB_OUTPUT
-
   deploy-staging:
     needs: validate
     runs-on: ubuntu-latest
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    environment: staging   # no approval required, auto-deploy after push to main
+    environment: staging
     steps:
       - name: Download converted rules
         uses: actions/download-artifact@v4
@@ -142,18 +181,18 @@ jobs:
 
       - name: Deploy to ELK Staging
         run: |
-          # Example using curl to Elasticsearch API (mock for demo)
           for rule in build/elk/*.json; do
             echo "Deploying $rule to ELK staging..."
+            # Replace with actual curl to Elasticsearch API:
             # curl -X POST "https://elk-staging:9200/..." -H "Content-Type: application/json" -d @"$rule"
           done
 
       - name: Deploy to Wazuh Staging
         run: |
-          # Example SCP to Wazuh staging manager
           for rule in build/wazuh/*.xml; do
             echo "Deploying $rule to Wazuh staging..."
-            # scp "$rule" user@wazuh-staging:/var/ossec/etc/rules/
+            # Replace with actual scp/ssh to Wazuh manager:
+            # scp "$rule" wazuh-staging:/var/ossec/etc/rules/
           done
 
   deploy-production:
@@ -162,6 +201,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
+     
     steps:
       - name: Download converted rules
         uses: actions/download-artifact@v4
@@ -180,5 +220,5 @@ jobs:
         run: |
           for rule in build/wazuh/*.xml; do
             echo "Deploying $rule to Wazuh production..."
-            # scp "$rule" user@wazuh-prod:/var/ossec/etc/rules/
+            # scp "$rule" wazuh-prod:/var/ossec/etc/rules/
           done
