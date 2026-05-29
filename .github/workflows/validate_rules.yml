@@ -25,15 +25,14 @@ jobs:
     # STEP 3: Install dependencies
     - name: Install Sigma + tools
       run: |
-        pip install sigma-cli pyyaml
+        pip install sigma-cli sigma-backend-elasticsearch sigma-backend-wazuh pyyaml
 
-    # STEP 4: Validate YAML syntax (CRITICAL for broken_rule.yml)
+    # STEP 4: Validate YAML syntax
     - name: YAML Syntax Check
       run: |
         python - <<'PY'
         import glob
         import sys
-
         import yaml
 
         files = glob.glob('sigma_rules/*.yml')
@@ -52,21 +51,29 @@ jobs:
             sys.exit(1)
         PY
 
-    # STEP 5: Sigma validation (official)
+    # STEP 5: Sigma rule validation
     - name: Sigma Rule Validation
       run: |
-        sigma validate sigma_rules/*.yml
+        for file in sigma_rules/*.yml; do
+          echo "Checking $file"
+          sigma check "$file" || exit 1
+        done
 
-    # STEP 6: SOC rule schema validation (custom governance layer)
+    # STEP 6: SOC rule schema validation
     - name: Rule Structure Validation
       run: |
         python - <<'PY'
         import glob
         import sys
-
         import yaml
 
-        REQUIRED_FIELDS = ['title', 'id', 'description', 'logsource', 'detection', 'condition']
+        REQUIRED_FIELDS = [
+            'title',
+            'id',
+            'description',
+            'logsource',
+            'detection'
+        ]
 
         files = glob.glob('sigma_rules/*.yml')
         failed = False
@@ -78,34 +85,39 @@ jobs:
 
             for field in REQUIRED_FIELDS:
                 if field not in data:
-                    print(f'❌ Missing field: {field} in {f}')
+                    print(f'Missing field: {field} in {f}')
                     failed = True
 
-            # extra strict check for ID format
             if 'id' in data:
                 if not isinstance(data['id'], (str, int)):
-                    print(f'❌ Invalid ID type in {f}')
+                    print(f'Invalid ID type in {f}')
+                    failed = True
+
+            if 'detection' in data:
+                if 'condition' not in data['detection']:
+                    print(f'Missing detection.condition in {f}')
                     failed = True
 
         if failed:
-            print('\nRULE VALIDATION FAILED ❌')
+            print('\nRULE VALIDATION FAILED')
             sys.exit(1)
 
-        print('\nALL RULES PASSED ✅')
+        print('\nALL RULES PASSED')
         PY
 
-    # STEP 7: Convert rules (optional but recommended)
-    - name: Convert Sigma → ELK
+    # STEP 7: Convert Sigma → ELK
+    - name: Convert Sigma to ELK
       run: |
         mkdir -p build/elk
-        sigma convert -t elasticsearch -p ecs sigma_rules/ > build/elk/elk_rules.json
+        sigma convert -t elasticsearch -p ecs sigma_rules/*.yml > build/elk/elk_rules.json
 
-    - name: Convert Sigma → Wazuh
+    # STEP 8: Convert Sigma → Wazuh
+    - name: Convert Sigma to Wazuh
       run: |
         mkdir -p build/wazuh
-        sigma convert -t wazuh sigma_rules/ > build/wazuh/wazuh_rules.xml
+        sigma convert -t wazuh sigma_rules/*.yml > build/wazuh/wazuh_rules.xml
 
-    # STEP 8: Upload artifacts
+    # STEP 9: Upload artifacts
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
