@@ -12,7 +12,7 @@ jobs:
 
     steps:
 
-    # STEP 1: Checkout repository
+    # STEP 1: Checkout Repository
     - name: Checkout Repository
       uses: actions/checkout@v3
 
@@ -22,12 +22,12 @@ jobs:
       with:
         python-version: '3.10'
 
-    # STEP 3: Install dependencies
+    # STEP 3: Install Dependencies
     - name: Install Sigma + tools
       run: |
         pip install sigma-cli pyyaml
 
-    # STEP 4: YAML syntax validation
+    # STEP 4: YAML Syntax Validation
     - name: YAML Syntax Check
       run: |
         python - <<'PY'
@@ -53,7 +53,7 @@ jobs:
         print('All YAML files are valid.')
         PY
 
-    # STEP 5: Sigma rule validation
+    # STEP 5: Sigma Rule Validation
     - name: Sigma Rule Validation
       run: |
         for file in sigma_rules/*.yml; do
@@ -61,7 +61,7 @@ jobs:
           sigma check "$file" || exit 1
         done
 
-    # STEP 6: Custom rule structure validation
+    # STEP 6: Custom Rule Structure Validation
     - name: Rule Structure Validation
       run: |
         python - <<'PY'
@@ -107,19 +107,13 @@ jobs:
         print('\nALL RULES PASSED')
         PY
 
-    # STEP 7: Convert Sigma → Elastic ECS
-    - name: Convert Sigma to Elastic ECS
-      run: |
-        mkdir -p build/elk
-        sigma convert -t ecs_windows sigma_rules/*.yml > build/elk/elk_rules.txt
-
-    # STEP 8: Convert Sigma → Splunk
+    # STEP 7: Convert Sigma → Splunk
     - name: Convert Sigma to Splunk
       run: |
         mkdir -p build/splunk
         sigma convert -t splunk sigma_rules/*.yml > build/splunk/splunk_rules.txt
 
-    # STEP 9: Upload build artifacts
+    # STEP 8: Upload Build Artifacts
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
