@@ -1,5 +1,5 @@
 title: Suspicious PowerShell Encoded Command
-id: 7b8a4f2c-1e3d-4a5b-9c7d-8e6f2a1b3c4d   # Use a unique UUID (example)
+id: 7b8a4f2c-1e3d-4a5b-9c7d-8e6f2a1b3c4d   
 description: Detects PowerShell execution with an encoded command, a technique commonly used to obfuscate malicious scripts and evade simple string-based detection.
 author: Nouman Ali
 date: 2025-05-01
