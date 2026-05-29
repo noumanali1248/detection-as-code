@@ -1,0 +1,14 @@
+title Broken Rule
+
+id 1234
+
+description broken yaml
+
+logsource
+ product windows
+
+detection
+ selection
+   EventID 4625
+
+condition selection
