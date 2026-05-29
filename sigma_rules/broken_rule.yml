@@ -1,0 +1,14 @@
+title Suspicious Broken Rule
+
+id 9999
+
+description Detect broken sigma syntax
+
+logsource:
+ product: windows
+
+detection:
+ selection:
+   EventID: 4625
+
+condition selection
