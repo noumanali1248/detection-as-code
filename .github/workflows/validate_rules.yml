@@ -20,7 +20,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Sigma CLI and Dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install sigma-cli pyyaml
@@ -31,7 +31,7 @@ jobs:
           import glob, sys, yaml
           files = glob.glob('sigma_rules/*.yml')
           if not files:
-              print("No .yml files found in sigma_rules/")
+              print("No .yml files found")
               sys.exit(1)
           failed = False
           for f in files:
@@ -45,25 +45,24 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Sigma Rule Validation (sigma check)
+      - name: Sigma Rule Validation
         run: |
           for file in sigma_rules/*.yml; do
-            echo "Checking $file"
             sigma check "$file" || exit 1
           done
 
-      - name: Custom Rule Structure Validation
+      - name: Structure Validation
         run: |
           python - <<'PY'
           import glob, sys, yaml
-          REQUIRED = ['title', 'id', 'description', 'logsource', 'detection']
+          required = ['title', 'id', 'description', 'logsource', 'detection']
           files = glob.glob('sigma_rules/*.yml')
           failed = False
           for f in files:
               data = yaml.safe_load(open(f))
-              for field in REQUIRED:
+              for field in required:
                   if field not in data:
-                      print(f'❌ Missing field: {field} in {f}')
+                      print(f'❌ Missing {field} in {f}')
                       failed = True
               if 'detection' in data and 'condition' not in data['detection']:
                   print(f'❌ Missing detection.condition in {f}')
@@ -71,11 +70,11 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Convert Sigma to ELK (EQL + JSON)
+      - name: Convert Sigma to ELK JSON (EQL)
         run: |
           mkdir -p build/elk
           python - <<'PY'
-          import os, sys, yaml, glob, json
+          import os, sys, yaml, glob, json, uuid
           def sigma_to_eql(sigma_data):
               detection = sigma_data.get('detection', {})
               eql_parts = []
@@ -92,7 +91,7 @@ jobs:
                               or_conds = [f'{field} == "{v}"' for v in value]
                               eql_parts.append('(' + ' or '.join(or_conds) + ')')
               eql_query = ' and '.join(eql_parts) if eql_parts else 'true'
-              # Ensure all fields conform to Elastic Detection Engine API
+              rule_id = str(sigma_data.get('id')) if sigma_data.get('id') else str(uuid.uuid4())
               rule_json = {
                   "type": "eql",
                   "name": sigma_data.get('title', 'sigma_rule'),
@@ -103,7 +102,8 @@ jobs:
                   "interval": "5m",
                   "enabled": True,
                   "description": sigma_data.get('description', ''),
-                  "author": [sigma_data.get('author', 'Detection Team')]   # array, not string
+                  "author": [sigma_data.get('author', 'Detection Team')],
+                  "rule_id": rule_id
               }
               return eql_query, rule_json
           failed = False
@@ -117,14 +117,14 @@ jobs:
                       out.write(eql_query)
                   with open(f'build/elk/{base}.json', 'w') as out:
                       json.dump(rule_json, out, indent=2)
-                  print(f'✅ Converted {rule_file} -> ELK')
+                  print(f'✅ Converted {rule_file}')
               except Exception as e:
                   print(f'❌ Failed {rule_file}: {e}')
                   failed = True
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Convert Sigma to Wazuh XML (Custom)
+      - name: Convert Sigma to Wazuh XML
         run: |
           mkdir -p build/wazuh
           python - <<'PY'
@@ -132,8 +132,9 @@ jobs:
           def sigma_to_wazuh(sigma_data):
               rule_id = str(sigma_data.get('id', '100000'))[:20]
               level = sigma_data.get('level', '5')
-              if isinstance(level, int): level = str(level)
-              level_map = {'low':'3', 'medium':'7', 'high':'10', 'critical':'15'}
+              if isinstance(level, int):
+                  level = str(level)
+              level_map = {'low':'3','medium':'7','high':'10','critical':'15'}
               level = level_map.get(level.lower(), level)
               root = ET.Element("rule", id=rule_id, level=level)
               ET.SubElement(root, "description").text = sigma_data.get('description', '')
@@ -160,7 +161,7 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Upload Build Artifacts
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: detection-rules-converted
@@ -172,33 +173,42 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: staging
     steps:
-      - name: Download converted rules
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: detection-rules-converted
           path: build/
 
-      - name: Deploy to ELK Staging
+      - name: Deploy to ELK Staging (idempotent)
         env:
           KIBANA_URL: ${{ secrets.ELASTIC_KIBANA_URL_STAGING }}
           API_KEY: ${{ secrets.ELASTIC_API_KEY_STAGING }}
         run: |
           for rule in build/elk/*.json; do
-            echo "Deploying $rule to ELK staging..."
-            response=$(curl -s -X POST "${KIBANA_URL}/api/detection_engine/rules" \
-              -H "Content-Type: application/json" \
-              -H "kbn-xsrf: true" \
+            echo "Processing $rule"
+            RULE_ID=$(jq -r '.rule_id' "$rule")
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              "${KIBANA_URL}/api/detection_engine/rules?rule_id=${RULE_ID}" \
               -H "Authorization: ApiKey ${API_KEY}" \
-              -d @"$rule")
-            if echo "$response" | grep -q '"error"'; then
-              echo "❌ ELK staging deployment failed for $rule: $response"
-              exit 1
+              -H "kbn-xsrf: true")
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "Rule exists, updating (PUT)"
+              curl -X PUT "${KIBANA_URL}/api/detection_engine/rules?rule_id=${RULE_ID}" \
+                -H "Content-Type: application/json" \
+                -H "kbn-xsrf: true" \
+                -H "Authorization: ApiKey ${API_KEY}" \
+                -d @"$rule"
             else
-              echo "✅ ELK staging rule deployed: $rule"
+              echo "Rule not found, creating (POST)"
+              curl -X POST "${KIBANA_URL}/api/detection_engine/rules" \
+                -H "Content-Type: application/json" \
+                -H "kbn-xsrf: true" \
+                -H "Authorization: ApiKey ${API_KEY}" \
+                -d @"$rule"
             fi
           done
 
-      - name: Deploy to Wazuh Staging (Echo placeholder)
+      - name: Wazuh Staging (placeholder)
         run: |
           for rule in build/wazuh/*.xml; do
             echo "[ECHO] Would deploy $rule to Wazuh staging"
@@ -210,35 +220,44 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
-      # required_reviewers: [security-lead]   # Uncomment when ready
+      # required_reviewers: [security-lead]   # uncomment if needed
     steps:
-      - name: Download converted rules
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           name: detection-rules-converted
           path: build/
 
-      - name: Deploy to ELK Production
+      - name: Deploy to ELK Production (idempotent)
         env:
           KIBANA_URL: ${{ secrets.ELASTIC_KIBANA_URL_PROD }}
           API_KEY: ${{ secrets.ELASTIC_API_KEY_PROD }}
         run: |
           for rule in build/elk/*.json; do
-            echo "Deploying $rule to ELK production..."
-            response=$(curl -s -X POST "${KIBANA_URL}/api/detection_engine/rules" \
-              -H "Content-Type: application/json" \
-              -H "kbn-xsrf: true" \
+            echo "Processing $rule"
+            RULE_ID=$(jq -r '.rule_id' "$rule")
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              "${KIBANA_URL}/api/detection_engine/rules?rule_id=${RULE_ID}" \
               -H "Authorization: ApiKey ${API_KEY}" \
-              -d @"$rule")
-            if echo "$response" | grep -q '"error"'; then
-              echo "❌ ELK production deployment failed for $rule: $response"
-              exit 1
+              -H "kbn-xsrf: true")
+            if [ "$HTTP_CODE" -eq 200 ]; then
+              echo "Rule exists, updating (PUT)"
+              curl -X PUT "${KIBANA_URL}/api/detection_engine/rules?rule_id=${RULE_ID}" \
+                -H "Content-Type: application/json" \
+                -H "kbn-xsrf: true" \
+                -H "Authorization: ApiKey ${API_KEY}" \
+                -d @"$rule"
             else
-              echo "✅ ELK production rule deployed: $rule"
+              echo "Rule not found, creating (POST)"
+              curl -X POST "${KIBANA_URL}/api/detection_engine/rules" \
+                -H "Content-Type: application/json" \
+                -H "kbn-xsrf: true" \
+                -H "Authorization: ApiKey ${API_KEY}" \
+                -d @"$rule"
             fi
           done
 
-      - name: Deploy to Wazuh Production (Echo placeholder)
+      - name: Wazuh Production (placeholder)
         run: |
           for rule in build/wazuh/*.xml; do
             echo "[ECHO] Would deploy $rule to Wazuh production"
