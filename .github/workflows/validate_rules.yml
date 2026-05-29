@@ -20,26 +20,23 @@ jobs:
         with:
           python-version: '3.11'
 
-      # STEP 3: Install Dependencies
-      - name: Install Sigma CLI and Splunk Backend
+      # STEP 3: Install Dependencies (Sigma + backends for ELK and Wazuh)
+      - name: Install Sigma CLI and Backends
         run: |
           python -m pip install --upgrade pip
           pip install sigma-cli pyyaml
-          sigma plugin install splunk
+          sigma plugin install elasticsearch
+          sigma plugin install wazuh
 
       # STEP 4: YAML Syntax Validation
       - name: YAML Syntax Check
         run: |
           python - <<'PY'
-          import glob
-          import sys
-          import yaml
-
+          import glob, sys, yaml
           files = glob.glob('sigma_rules/*.yml')
           if not files:
               print("No .yml files found in sigma_rules/")
               sys.exit(1)
-
           failed = False
           for f in files:
               try:
@@ -49,7 +46,6 @@ jobs:
               except Exception as e:
                   print(f'❌ INVALID YAML: {f}\n{e}')
                   failed = True
-
           if failed:
               sys.exit(1)
           print('\nAll YAML files are valid.')
@@ -67,63 +63,62 @@ jobs:
       - name: Rule Structure Validation
         run: |
           python - <<'PY'
-          import glob
-          import sys
-          import yaml
-
+          import glob, sys, yaml
           REQUIRED_FIELDS = ['title', 'id', 'description', 'logsource', 'detection']
           files = glob.glob('sigma_rules/*.yml')
           failed = False
-
           for f in files:
               data = yaml.safe_load(open(f))
               print(f'\nChecking {f}')
-
               for field in REQUIRED_FIELDS:
                   if field not in data:
                       print(f'❌ Missing field: {field}')
                       failed = True
-
-              if 'id' in data:
-                  if not isinstance(data['id'], (str, int)):
-                      print(f'❌ Invalid ID type in {f}')
-                      failed = True
-
+              if 'id' in data and not isinstance(data['id'], (str, int)):
+                  print(f'❌ Invalid ID type in {f}')
+                  failed = True
               if 'detection' in data and 'condition' not in data['detection']:
                   print(f'❌ Missing detection.condition in {f}')
                   failed = True
-
           if failed:
               print('\n❌ RULE VALIDATION FAILED')
               sys.exit(1)
-
           print('\n✅ ALL RULES PASSED STRUCTURE VALIDATION')
           PY
 
-      # STEP 7: Convert Sigma Rules → Splunk SPL (fixed)
-      - name: Convert Sigma to Splunk
+      # STEP 7: Convert Sigma → ELK (Elasticsearch / EQL format)
+      - name: Convert Sigma to ELK
         run: |
-          mkdir -p build/splunk
-          output_file="build/splunk/splunk_rules.txt"
-          # Clear or create the output file
-          > "$output_file"
-
+          mkdir -p build/elk
           for rule in sigma_rules/*.yml; do
-            echo "# Rule: $(basename "$rule")" >> "$output_file"
-            sigma convert -t splunk --without-pipeline "$rule" >> "$output_file" 2>&1
+            base=$(basename "$rule" .yml)
+            echo "Converting $rule to ELK format..."
+            sigma convert -t elasticsearch --without-pipeline "$rule" > "build/elk/${base}.json"
             if [ $? -ne 0 ]; then
-              echo "❌ Conversion failed for $rule"
+              echo "❌ ELK conversion failed for $rule"
               exit 1
             fi
-            echo -e "\n" >> "$output_file"
           done
+          echo "✅ All Sigma rules converted to ELK (Elasticsearch format)"
 
-          echo "✅ All Sigma rules converted to Splunk format"
-          cat "$output_file"  # optional: show preview in logs
+      # STEP 8: Convert Sigma → Wazuh (XML format)
+      - name: Convert Sigma to Wazuh
+        run: |
+          mkdir -p build/wazuh
+          for rule in sigma_rules/*.yml; do
+            base=$(basename "$rule" .yml)
+            echo "Converting $rule to Wazuh XML..."
+            sigma convert -t wazuh --without-pipeline "$rule" > "build/wazuh/${base}.xml"
+            if [ $? -ne 0 ]; then
+              echo "❌ Wazuh conversion failed for $rule"
+              exit 1
+            fi
+          done
+          echo "✅ All Sigma rules converted to Wazuh XML"
 
-      # STEP 8: Upload Build Artifacts
+      # STEP 9: Upload Build Artifacts (converted rules for ELK and Wazuh)
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: detection-rules
+          name: detection-rules-converted
           path: build/
