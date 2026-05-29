@@ -12,7 +12,7 @@ jobs:
 
     steps:
 
-    # STEP 1: Checkout repo
+    # STEP 1: Checkout repository
     - name: Checkout Repository
       uses: actions/checkout@v3
 
@@ -25,9 +25,9 @@ jobs:
     # STEP 3: Install dependencies
     - name: Install Sigma + tools
       run: |
-        pip install sigma-cli sigma-backend-elasticsearch sigma-backend-wazuh pyyaml
+        pip install sigma-cli pyyaml
 
-    # STEP 4: Validate YAML syntax
+    # STEP 4: YAML syntax validation
     - name: YAML Syntax Check
       run: |
         python - <<'PY'
@@ -49,6 +49,8 @@ jobs:
 
         if failed:
             sys.exit(1)
+
+        print('All YAML files are valid.')
         PY
 
     # STEP 5: Sigma rule validation
@@ -59,7 +61,7 @@ jobs:
           sigma check "$file" || exit 1
         done
 
-    # STEP 6: SOC rule schema validation
+    # STEP 6: Custom rule structure validation
     - name: Rule Structure Validation
       run: |
         python - <<'PY'
@@ -105,19 +107,19 @@ jobs:
         print('\nALL RULES PASSED')
         PY
 
-    # STEP 7: Convert Sigma → ELK
-    - name: Convert Sigma to ELK
+    # STEP 7: Convert Sigma → Elastic ECS
+    - name: Convert Sigma to Elastic ECS
       run: |
         mkdir -p build/elk
-        sigma convert -t elasticsearch -p ecs sigma_rules/*.yml > build/elk/elk_rules.json
+        sigma convert -t ecs_windows sigma_rules/*.yml > build/elk/elk_rules.txt
 
-    # STEP 8: Convert Sigma → Wazuh
-    - name: Convert Sigma to Wazuh
+    # STEP 8: Convert Sigma → Splunk
+    - name: Convert Sigma to Splunk
       run: |
-        mkdir -p build/wazuh
-        sigma convert -t wazuh sigma_rules/*.yml > build/wazuh/wazuh_rules.xml
+        mkdir -p build/splunk
+        sigma convert -t splunk sigma_rules/*.yml > build/splunk/splunk_rules.txt
 
-    # STEP 9: Upload artifacts
+    # STEP 9: Upload build artifacts
     - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
