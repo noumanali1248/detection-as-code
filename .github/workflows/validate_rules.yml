@@ -10,112 +10,120 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # STEP 1: Checkout Repository
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-    # STEP 1: Checkout Repository
-    - name: Checkout Repository
-      uses: actions/checkout@v3
+      # STEP 2: Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    # STEP 2: Setup Python
-    - name: Setup Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      # STEP 3: Install Dependencies
+      - name: Install Sigma CLI and Splunk Backend
+        run: |
+          python -m pip install --upgrade pip
+          pip install sigma-cli pyyaml
+          sigma plugin install splunk
 
-    # STEP 3: Install Dependencies
-    - name: Install Sigma CLI and Plugins
-      run: |
-        pip install sigma-cli pyyaml
-        sigma plugin install splunk
+      # STEP 4: YAML Syntax Validation
+      - name: YAML Syntax Check
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import yaml
 
-    # STEP 4: YAML Syntax Validation
-    - name: YAML Syntax Check
-      run: |
-        python - <<'PY'
-        import glob
-        import sys
-        import yaml
+          files = glob.glob('sigma_rules/*.yml')
+          if not files:
+              print("No .yml files found in sigma_rules/")
+              sys.exit(1)
 
-        files = glob.glob('sigma_rules/*.yml')
-        failed = False
+          failed = False
+          for f in files:
+              try:
+                  with open(f) as fp:
+                      yaml.safe_load(fp)
+                  print(f'✅ VALID YAML: {f}')
+              except Exception as e:
+                  print(f'❌ INVALID YAML: {f}\n{e}')
+                  failed = True
 
-        for f in files:
-            try:
-                yaml.safe_load(open(f))
-                print(f'VALID YAML: {f}')
-            except Exception as e:
-                print(f'INVALID YAML: {f}')
-                print(e)
-                failed = True
+          if failed:
+              sys.exit(1)
+          print('\nAll YAML files are valid.')
+          PY
 
-        if failed:
-            sys.exit(1)
+      # STEP 5: Sigma Rule Validation (syntax + logic)
+      - name: Sigma Rule Validation
+        run: |
+          for file in sigma_rules/*.yml; do
+            echo "Checking $file"
+            sigma check "$file" || exit 1
+          done
 
-        print('All YAML files are valid.')
-        PY
+      # STEP 6: Custom Rule Structure Validation
+      - name: Rule Structure Validation
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import yaml
 
-    # STEP 5: Sigma Rule Validation
-    - name: Sigma Rule Validation
-      run: |
-        for file in sigma_rules/*.yml; do
-          echo "Checking $file"
-          sigma check "$file" || exit 1
-        done
+          REQUIRED_FIELDS = ['title', 'id', 'description', 'logsource', 'detection']
+          files = glob.glob('sigma_rules/*.yml')
+          failed = False
 
-    # STEP 6: Custom Rule Structure Validation
-    - name: Rule Structure Validation
-      run: |
-        python - <<'PY'
-        import glob
-        import sys
-        import yaml
+          for f in files:
+              data = yaml.safe_load(open(f))
+              print(f'\nChecking {f}')
 
-        REQUIRED_FIELDS = [
-            'title',
-            'id',
-            'description',
-            'logsource',
-            'detection'
-        ]
+              for field in REQUIRED_FIELDS:
+                  if field not in data:
+                      print(f'❌ Missing field: {field}')
+                      failed = True
 
-        files = glob.glob('sigma_rules/*.yml')
-        failed = False
+              if 'id' in data:
+                  if not isinstance(data['id'], (str, int)):
+                      print(f'❌ Invalid ID type in {f}')
+                      failed = True
 
-        for f in files:
-            data = yaml.safe_load(open(f))
+              if 'detection' in data and 'condition' not in data['detection']:
+                  print(f'❌ Missing detection.condition in {f}')
+                  failed = True
 
-            print(f'\nChecking {f}')
+          if failed:
+              print('\n❌ RULE VALIDATION FAILED')
+              sys.exit(1)
 
-            for field in REQUIRED_FIELDS:
-                if field not in data:
-                    print(f'Missing field: {field} in {f}')
-                    failed = True
+          print('\n✅ ALL RULES PASSED STRUCTURE VALIDATION')
+          PY
 
-            if 'id' in data:
-                if not isinstance(data['id'], (str, int)):
-                    print(f'Invalid ID type in {f}')
-                    failed = True
+      # STEP 7: Convert Sigma Rules → Splunk SPL (fixed)
+      - name: Convert Sigma to Splunk
+        run: |
+          mkdir -p build/splunk
+          output_file="build/splunk/splunk_rules.txt"
+          # Clear or create the output file
+          > "$output_file"
 
-            if 'detection' in data:
-                if 'condition' not in data['detection']:
-                    print(f'Missing detection.condition in {f}')
-                    failed = True
+          for rule in sigma_rules/*.yml; do
+            echo "# Rule: $(basename "$rule")" >> "$output_file"
+            sigma convert -t splunk --without-pipeline "$rule" >> "$output_file" 2>&1
+            if [ $? -ne 0 ]; then
+              echo "❌ Conversion failed for $rule"
+              exit 1
+            fi
+            echo -e "\n" >> "$output_file"
+          done
 
-        if failed:
-            print('\nRULE VALIDATION FAILED')
-            sys.exit(1)
+          echo "✅ All Sigma rules converted to Splunk format"
+          cat "$output_file"  # optional: show preview in logs
 
-        print('\nALL RULES PASSED')
-        PY
-
-    # STEP 7: Convert Sigma Rules → Splunk
-    - name: Convert Sigma to Splunk
-      run: |
-        mkdir -p build/splunk
-        sigma convert -t splunk sigma_rules/*.yml > build/splunk/splunk_rules.txt
-
-    # STEP 8: Upload Build Artifacts
-    - name: Upload Build Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: detection-rules
-        path: build/
+      # STEP 8: Upload Build Artifacts
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-rules
+          path: build/
