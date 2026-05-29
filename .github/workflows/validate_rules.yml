@@ -18,11 +18,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Sigma CLI and Elasticsearch Backend
+      - name: Install Sigma CLI and Backends
         run: |
           python -m pip install --upgrade pip
           pip install sigma-cli pyyaml
-          sigma plugin install elasticsearch
+          # No plugin needed for built-in 'eql' backend
+          # If you need Splunk later, install splunk plugin
+          # sigma plugin install splunk
 
       - name: YAML Syntax Check
         run: |
@@ -30,7 +32,7 @@ jobs:
           import glob, sys, yaml
           files = glob.glob('sigma_rules/*.yml')
           if not files:
-              print("No .yml files found")
+              print("No .yml files found in sigma_rules/")
               sys.exit(1)
           failed = False
           for f in files:
@@ -47,6 +49,7 @@ jobs:
       - name: Sigma Rule Validation
         run: |
           for file in sigma_rules/*.yml; do
+            echo "Checking $file"
             sigma check "$file" || exit 1
           done
 
@@ -69,36 +72,56 @@ jobs:
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Convert Sigma to ELK (Elasticsearch)
+      # Convert Sigma to ELK (EQL format)
+      - name: Convert Sigma to ELK (EQL)
         run: |
           mkdir -p build/elk
           for rule in sigma_rules/*.yml; do
             base=$(basename "$rule" .yml)
-            sigma convert -t elasticsearch --without-pipeline "$rule" > "build/elk/${base}.json"
+            echo "Converting $rule to EQL..."
+            sigma convert -t eql "$rule" > "build/elk/${base}.eql"
             if [ $? -ne 0 ]; then
-              echo "❌ ELK conversion failed for $rule"
+              echo "❌ EQL conversion failed for $rule"
               exit 1
             fi
+            # Optional: wrap EQL into Elastic rule JSON
+            echo "{\"type\":\"eql\",\"name\":\"$base\",\"language\":\"eql\",\"query\":$(jq -Rs . < "build/elk/${base}.eql"),\"severity\":\"medium\",\"enabled\":true}" > "build/elk/${base}.json"
           done
+          echo "✅ All Sigma rules converted to ELK EQL"
 
-      - name: Convert Sigma to Wazuh XML (Custom Converter)
+      # Custom Wazuh XML converter (because no native plugin)
+      - name: Convert Sigma to Wazuh XML (Custom)
         run: |
           mkdir -p build/wazuh
           python - <<'PY'
           import os, sys, yaml, glob, xml.etree.ElementTree as ET
 
-          def sigma_to_wazuh_rule(sigma_data, rule_name):
-              # Minimal mapping: create Wazuh rule XML
-              root = ET.Element("rule", id=str(sigma_data.get('id', '1001')), level="10")
-              title = sigma_data.get('title', '')
-              desc = sigma_data.get('description', '')
-              if 'logsource' in sigma_data and 'product' in sigma_data['logsource']:
-                  product = sigma_data['logsource']['product']
-                  ET.SubElement(root, "if_sid").text = "5710"  # generic parent
-              if 'detection' in sigma_data:
-                  # simplified: use description as match string
-                  ET.SubElement(root, "match").text = title[:50]
+          def sigma_to_wazuh(sigma_data):
+              rule_id = str(sigma_data.get('id', '100000'))[:20]
+              level = sigma_data.get('level', '5')
+              if isinstance(level, int): level = str(level)
+              # Map Sigma level to Wazuh level (0-15)
+              level_map = {'low': '3', 'medium': '7', 'high': '10', 'critical': '15'}
+              level = level_map.get(level.lower(), level)
+              
+              root = ET.Element("rule", id=rule_id, level=level)
+              desc = sigma_data.get('description', 'No description')
               ET.SubElement(root, "description").text = desc
+              
+              # Extract logsource product/category for grouping
+              logsource = sigma_data.get('logsource', {})
+              if 'product' in logsource:
+                  ET.SubElement(root, "if_sid").text = "5710"  # generic windows parent
+              if 'category' in logsource:
+                  ET.SubElement(root, "category").text = logsource['category']
+              
+              # Use detection field keywords as <match> example
+              detection = sigma_data.get('detection', {})
+              if 'selection' in detection:
+                  first_sel = detection['selection']
+                  if isinstance(first_sel, dict):
+                      for key in list(first_sel.keys())[:2]:
+                          ET.SubElement(root, "match").text = f"{key} {first_sel[key]}"
               return ET.tostring(root, encoding='unicode')
 
           failed = False
@@ -108,7 +131,7 @@ jobs:
               basename = os.path.basename(f).replace('.yml', '.xml')
               outpath = os.path.join('build/wazuh', basename)
               try:
-                  xml_output = sigma_to_wazuh_rule(data, basename)
+                  xml_output = sigma_to_wazuh(data)
                   with open(outpath, 'w') as out:
                       out.write(xml_output)
                   print(f'✅ Converted {f} -> {outpath}')
