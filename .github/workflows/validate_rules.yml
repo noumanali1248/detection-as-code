@@ -92,6 +92,7 @@ jobs:
                               or_conds = [f'{field} == "{v}"' for v in value]
                               eql_parts.append('(' + ' or '.join(or_conds) + ')')
               eql_query = ' and '.join(eql_parts) if eql_parts else 'true'
+              # Ensure all fields conform to Elastic Detection Engine API
               rule_json = {
                   "type": "eql",
                   "name": sigma_data.get('title', 'sigma_rule'),
@@ -102,7 +103,7 @@ jobs:
                   "interval": "5m",
                   "enabled": True,
                   "description": sigma_data.get('description', ''),
-                  "author": sigma_data.get('author', 'Detection Team')
+                  "author": [sigma_data.get('author', 'Detection Team')]   # array, not string
               }
               return eql_query, rule_json
           failed = False
@@ -197,11 +198,10 @@ jobs:
             fi
           done
 
-      - name: Deploy to Wazuh Staging (Echo - No real deployment)
+      - name: Deploy to Wazuh Staging (Echo placeholder)
         run: |
           for rule in build/wazuh/*.xml; do
             echo "[ECHO] Would deploy $rule to Wazuh staging"
-            echo "Command: scp $rule wazuh-manager:/var/ossec/etc/rules/"
           done
 
   deploy-production:
@@ -210,7 +210,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment:
       name: production
-      # required_reviewers: [security-lead]   # Uncomment when you set up a reviewer
+      # required_reviewers: [security-lead]   # Uncomment when ready
     steps:
       - name: Download converted rules
         uses: actions/download-artifact@v4
@@ -238,9 +238,8 @@ jobs:
             fi
           done
 
-      - name: Deploy to Wazuh Production (Echo - No real deployment)
+      - name: Deploy to Wazuh Production (Echo placeholder)
         run: |
           for rule in build/wazuh/*.xml; do
             echo "[ECHO] Would deploy $rule to Wazuh production"
-            echo "Command: scp $rule wazuh-manager:/var/ossec/etc/rules/"
           done
