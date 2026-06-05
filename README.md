@@ -1,6 +1,7 @@
 # Detection-as-Code (DaC) with Sigma, GitHub Actions, ELK & Wazuh
 
-[![CI/CD Pipeline](https://github.com/your-org/detection-as-code/actions/workflows/detection-pipeline.yml/badge.svg)](https://github.com/your-org/detection-as-code/actions/workflows/detection-pipeline.yml)
+<img width="975" height="453" alt="image" src="https://github.com/user-attachments/assets/2412b774-daa7-43cd-a590-a94cfec7bc9f" />
+
 
 ## Overview
 
@@ -30,7 +31,8 @@ The pipeline automatically validates every rule change, converts Sigma rules to 
 
 ## Architecture
 
-![DaC Architecture](docs/architecture.png)
+<img width="1022" height="612" alt="image" src="https://github.com/user-attachments/assets/28024636-95c8-45e6-9157-ad2c78083605" />
+
 
 The pipeline consists of three layers:
 
